@@ -13,22 +13,19 @@ func main() {
 	// List of repositories to clone and test
 	repositories := []string{
 		"https://github.com/openshift/addon-operator.git",
-"https://github.com/openshift/cloud-ingress-operator.git",
-"https://github.com/openshift/configure-alertmanager-operator.git",
-"https://github.com/openshift/custom-domains-operator.git",
-"https://github.com/openshift/deployment-validation-operator.git",
-"https://github.com/openshift/managed-node-metadata-operator.git",
-"https://github.com/openshift/managed-upgrade-operator.git",
-"https://github.com/openshift/managed-velero-operator.git",
-"https://github.com/openshift/must-gather-operator.git",
-"https://github.com/openshift/ocm-agent-operator.git",
-"https://github.com/openshift/osd-metrics-exporter.git",
-"https://github.com/openshift/rbac-permissions-operator.git",
-"https://github.com/openshift/route-monitor-operator.git",
-"https://github.com/openshift/splunk-forwarder-operator.git",
-
-
-
+		"https://github.com/openshift/cloud-ingress-operator.git",
+		"https://github.com/openshift/configure-alertmanager-operator.git",
+		"https://github.com/openshift/custom-domains-operator.git",
+		"https://github.com/openshift/deployment-validation-operator.git",
+		"https://github.com/openshift/managed-node-metadata-operator.git",
+		"https://github.com/openshift/managed-upgrade-operator.git",
+		"https://github.com/openshift/managed-velero-operator.git",
+		"https://github.com/openshift/must-gather-operator.git",
+		"https://github.com/openshift/ocm-agent-operator.git",
+		"https://github.com/openshift/osd-metrics-exporter.git",
+		"https://github.com/openshift/rbac-permissions-operator.git",
+		"https://github.com/openshift/route-monitor-operator.git",
+		"https://github.com/openshift/splunk-forwarder-operator.git",
 	}
 
 	// Create a report file
@@ -43,7 +40,7 @@ func main() {
 	// Get current working directory
 	baseDir, err := os.Getwd()
 	if err != nil {
-		fmt.Println(" Failed to get current working directory:", err)
+		fmt.Println("Failed to get current working directory:", err)
 		return
 	}
 
@@ -55,8 +52,8 @@ func main() {
 		cmd := exec.Command("git", "clone", repoURL)
 		if err := cmd.Run(); err != nil {
 			// Log failure if repo is not found
-			fmt.Println(" Repository not found:", repoURL)
-			_, _ = writer.WriteString(fmt.Sprintf("\n%s\n Repository Not Found.\n", repoName))
+			fmt.Println("Repository not found:", repoURL)
+			_, _ = writer.WriteString(fmt.Sprintf("\n%s\nRepository Not Found.\n", repoName))
 			writer.Flush()
 			continue
 		}
@@ -66,7 +63,6 @@ func main() {
 		if err := os.Chdir(repoPath); err != nil {
 			continue
 		}
-
 
 		// Run Ginkgo tests and capture output
 		output, _ := runGinkgoTests()
@@ -80,12 +76,12 @@ func main() {
 		// Write results to the report file
 		_, err = writer.WriteString(fmt.Sprintf("\n%s\n%s\n", repoName, testSummary))
 		if err != nil {
-			fmt.Println(" Error writing to report file:", err)
+			fmt.Println("Error writing to report file:", err)
 		}
 		writer.Flush()
 	}
 
-	fmt.Println("\n Test execution completed. Results saved in test_report.txt")
+	fmt.Println("\nTest execution completed. Results saved in test_report.txt")
 }
 
 // Extracts repository name from its Git URL
@@ -112,7 +108,7 @@ func runGinkgoTests() (string, error) {
 
 // Processes Ginkgo output and extracts failure information
 func processGinkgoOutput(output string) string {
-	failureRegex := regexp.MustCompile(There were failures detected in the following suites:\s+(.+))
+	failureRegex := regexp.MustCompile(`There were failures detected in the following suites:\s+(.+)`)
 	failureMatches := failureRegex.FindStringSubmatch(output)
 
 	if len(failureMatches) > 1 {
@@ -120,5 +116,5 @@ func processGinkgoOutput(output string) string {
 		return fmt.Sprintf("Failing test suite: %s\n", failingSuite)
 	}
 
-	return " No failing tests detected.\n No flaky tests detected.\n"
+	return "No failing tests detected.\nNo flaky tests detected.\n"
 }
