@@ -1,0 +1,55 @@
+addon-operator
+Failing test suite: integration ./integration
+
+
+cloud-ingress-operator
+Failing test suite: apischeme ./controllers/apischeme
+
+
+configure-alertmanager-operator
+Failing test suite: e2e ./test/e2e
+
+
+custom-domains-operator
+Failing test suite: e2e ./test/e2e
+
+
+deployment-validation-operator
+ Repository Not Found.
+
+managed-node-metadata-operator
+Failing test suite: int ./int
+
+
+managed-upgrade-operator
+Failing test suite: nodekeeper ./controllers/nodekeeper
+
+
+managed-velero-operator
+ No failing tests detected.
+ No flaky tests detected.
+
+
+must-gather-operator
+Failing test suite: e2e ./test/e2e
+
+
+ocm-agent-operator
+Failing test suite: v1alpha1 ./api/v1alpha1
+
+
+osd-metrics-exporter
+Failing test suite: e2e ./test/e2e
+
+
+rbac-permissions-operator
+Failing test suite: namespace ./controllers/namespace
+
+
+route-monitor-operator
+Failing test suite: clusterurlmonitor ./controllers/clusterurlmonitor
+
+
+splunk-forwarder-operator
+Failing test suite: e2e ./test/e2e
+
