@@ -18,6 +18,8 @@ import (
 	"golang.org/x/oauth2"
 )
 
+var failureRegex = regexp.MustCompile(`There were failures detected in the following suites:\s+(.+)`)
+
 func main() {
 	repoRange := flag.String("range", "", "Range of repos to test (e.g. 1-10). Empty means test all.")
 	flag.Parse()
@@ -192,7 +194,6 @@ func processGinkgoOutput(output string) string {
 		}
 	}
 
-	failureRegex := regexp.MustCompile(`There were failures detected in the following suites:\s+(.+)`)
 	failureMatches := failureRegex.FindStringSubmatch(output)
 	if len(failureMatches) > 1 {
 		failingSuite := strings.TrimSpace(failureMatches[1])
