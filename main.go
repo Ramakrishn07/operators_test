@@ -8,32 +8,39 @@ import (
 	"log"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"regexp"
 	"sort"
-	"strconv"
 	"strings"
-	"sync"
 
 	"github.com/google/go-github/v53/github"
 	"golang.org/x/oauth2"
 )
 
-var failureRegex = regexp.MustCompile(`There were failures detected in the following suites:\s+(.+)`)
+var (
+	failLineRegex  = regexp.MustCompile(`\[FAIL\]`)  // Matches any line containing [FAIL]
+	flakyRegex     = regexp.MustCompile(`\[FLAKY\]`) // Matches any line containing [FLAKY]
+)
 
 func main() {
-	repoRange := flag.String("range", "", "Range of repos to test (e.g. 1-10). Empty means test all.")
+	selectedRepo := flag.String("repo", "", "Specify a repository name to run tests on (e.g., 'cloud-ingress-operator')")
 	flag.Parse()
 
-	reportFile, err := os.Create("test_report.txt")
-	if err != nil {
-		log.Fatalf("Failed to create report file: %v", err)
+	ghToken := os.Getenv("GITHUB_TOKEN")
+	if ghToken == "" {
+		log.Fatal("Error: GITHUB_TOKEN is not set. Exiting.")
 	}
-	defer reportFile.Close()
-	writer := bufio.NewWriter(reportFile)
 
-	repositories, err := fetchOperatorRepos()
-	if err != nil {
-		log.Fatalf("Failed to fetch operator repos: %v", err)
+	var repositories []string
+	var err error
+	if *selectedRepo != "" {
+		repoURL := fmt.Sprintf("https://github.com/openshift/%s.git", *selectedRepo)
+		repositories = []string{repoURL}
+	} else {
+		repositories, err = fetchOperatorRepos()
+		if err != nil {
+			log.Fatalf("Failed to fetch operator repos: %v", err)
+		}
 	}
 
 	if len(repositories) == 0 {
@@ -42,88 +49,84 @@ func main() {
 	}
 
 	sort.Strings(repositories)
-
 	fmt.Println("Found", len(repositories), "operator repos:")
 	for i, repoURL := range repositories {
 		fmt.Printf("%3d) %s\n", i+1, repoURL)
 	}
 
-	startIndex, endIndex, err := parseRange(*repoRange, len(repositories))
+	reportFile, err := os.Create("test_report.txt")
 	if err != nil {
-		log.Fatalf("Error parsing --range=%q: %v", *repoRange, err)
+		log.Fatalf("Failed to create report file: %v", err)
 	}
+	defer reportFile.Close()
+	writer := bufio.NewWriter(reportFile)
 
-	var chosenRepos []string
-	if startIndex == 0 && endIndex == 0 {
-		chosenRepos = repositories
-		fmt.Println("\nNo range specified; testing ALL repos.\n")
-	} else {
-		chosenRepos = repositories[startIndex-1 : endIndex]
-		fmt.Printf("\nTesting repos from %d to %d (inclusive)\n", startIndex, endIndex)
+	skippedFile, err := os.Create("skipped_repos.txt")
+	if err != nil {
+		log.Fatalf("Failed to create skipped repos file: %v", err)
 	}
-
-	var wg sync.WaitGroup
-	sem := make(chan struct{}, 5) //  concurrency
+	defer skippedFile.Close()
+	skippedWriter := bufio.NewWriter(skippedFile)
 
 	baseDir, err := os.Getwd()
 	if err != nil {
 		log.Fatalf("Failed to get current working directory: %v", err)
 	}
-
-	for _, repoURL := range chosenRepos {
-		repoURL := repoURL
-		wg.Add(1)
-		go func(repoURL string) {
-			defer wg.Done()
-			sem <- struct{}{} // Acquire a slot
-			defer func() { <-sem }() // Release the slot
-
-			repoName := getRepoName(repoURL)
-			fmt.Println("Cloning repository:", repoURL)
-
-			cmd := exec.Command("git", "clone", "--depth=1", repoURL)
-			if err := cmd.Run(); err != nil {
-				fmt.Println("Repository not found or failed to clone:", repoURL)
-				_, _ = writer.WriteString(fmt.Sprintf("\n%s\nRepository Not Found.\n", repoName))
-				writer.Flush()
-				return
-			}
-
-			repoPath := fmt.Sprintf("%s/%s", baseDir, repoName)
-			if err := os.Chdir(repoPath); err != nil {
-				fmt.Println("Failed to cd into repo:", repoName)
-				return
-			}
-
-			output, _ := runGinkgoTests()
-
-			_ = os.Chdir(baseDir)
-
-			testSummary := processGinkgoOutput(output)
-
-			_, err := writer.WriteString(fmt.Sprintf("\n%s\n%s\n", repoName, testSummary))
-			if err != nil {
-				fmt.Println("Error writing to report file:", err)
-			}
-			writer.Flush()
-		}(repoURL)
+	reposFolder := filepath.Join(baseDir, "repos")
+	if err := os.MkdirAll(reposFolder, os.ModePerm); err != nil {
+		log.Fatalf("Failed to create repos directory: %v", err)
 	}
 
-	wg.Wait()
+	for _, repoURL := range repositories {
+		repoName := getRepoName(repoURL)
+		repoPath := filepath.Join(reposFolder, repoName)
+
+		fmt.Println("Cloning repository:", repoURL)
+		cmd := exec.Command("git", "clone", "--depth=1", repoURL, repoPath)
+		if err := cmd.Run(); err != nil {
+			fmt.Println("Repository not found or failed to clone:", repoURL)
+			_, _ = writer.WriteString(fmt.Sprintf("\n%s\nRepository Not Found.\n", repoName))
+			writer.Flush()
+			continue
+		}
+
+		testDir, err := getTestExecutionDir(repoPath)
+		if err != nil {
+			fmt.Println("Skipping repo (no valid e2e test directory found):", repoName)
+			_, _ = skippedWriter.WriteString(fmt.Sprintf("%s\n", repoName))
+			skippedWriter.Flush()
+			continue
+		}
+
+		var failedTests []string
+		var flakyTests []string
+
+		for i := 0; i < 3; i++ {
+			fmt.Printf("Running test for %s (Attempt %d/3) in directory %s\n", repoName, i+1, testDir)
+			output, _ := runGinkgoTests(testDir)
+			failed, flaky := parseTestResults(output)
+			failedTests = append(failedTests, failed...)
+			flakyTests = append(flakyTests, flaky...)
+		}
+
+		testSummary := generateSummary(failedTests, flakyTests)
+		_, err = writer.WriteString(fmt.Sprintf("\n%s\n%s\n", repoName, testSummary))
+		if err != nil {
+			fmt.Println("Error writing to report file:", err)
+		}
+		writer.Flush()
+	}
+
 	fmt.Println("\nTest execution completed. Results saved in test_report.txt")
+	fmt.Println("Skipped repos saved in skipped_repos.txt")
 }
 
 func fetchOperatorRepos() ([]string, error) {
 	ghToken := os.Getenv("GITHUB_TOKEN")
-	if ghToken == "" {
-		return nil, fmt.Errorf("no GITHUB_TOKEN set")
-	}
-
 	ctx := context.Background()
 	ts := oauth2.StaticTokenSource(&oauth2.Token{AccessToken: ghToken})
 	tc := oauth2.NewClient(ctx, ts)
 	client := github.NewClient(tc)
-
 	org := "openshift"
 	opt := &github.RepositoryListByOrgOptions{ListOptions: github.ListOptions{PerPage: 100}}
 
@@ -153,75 +156,75 @@ func getRepoName(repoURL string) string {
 	return strings.TrimSuffix(parts[len(parts)-1], ".git")
 }
 
-func runGinkgoTests() (string, error) {
-	cmd := exec.Command("ginkgo", "--flake-attempts=3", "--tags=osde2e", "-vv", "--trace", "./...")
+func getTestExecutionDir(repoPath string) (string, error) {
+	e2eFolder := filepath.Join(repoPath, "test", "e2e")
+	info, err := os.Stat(e2eFolder)
+	if os.IsNotExist(err) || !info.IsDir() {
+		return "", fmt.Errorf("e2e folder not found in %s", repoPath)
+	}
+	files, err := os.ReadDir(e2eFolder)
+	if err != nil {
+		return "", fmt.Errorf("error reading e2e folder in %s", repoPath)
+	}
+	hasGoFile := false
+	for _, f := range files {
+		if !f.IsDir() && filepath.Ext(f.Name()) == ".go" {
+			hasGoFile = true
+			break
+		}
+	}
+	if !hasGoFile {
+		return "", fmt.Errorf("no .go files found in %s", e2eFolder)
+	}
+	return e2eFolder, nil
+}
+
+func runGinkgoTests(testDir string) (string, error) {
+	cmd := exec.Command("ginkgo", "--flake-attempts=3", "--tags=osde2e", "--no-color", "-v", "--trace", ".")
+	cmd.Dir = testDir
 	outputBytes, err := cmd.CombinedOutput()
-	output := string(outputBytes)
-
-	if err != nil && strings.Contains(output, "Ginkgo detected a version mismatch") {
-		altCmd := exec.Command("go", "run", "github.com/onsi/ginkgo/v2/ginkgo",
-			"--flake-attempts=3", "--tags=osde2e", "-vv", "--trace", "./...")
-		outputBytes, err = altCmd.CombinedOutput()
-		output = string(outputBytes)
-	}
-
-	return output, err
+	return string(outputBytes), err
 }
 
-func processGinkgoOutput(output string) string {
-	if strings.Contains(output, "Summarizing ") {
-		var resultLines []string
-		lines := strings.Split(output, "\n")
-		inSummaries := false
-		for _, line := range lines {
-			trimmed := strings.TrimSpace(line)
-			if strings.HasPrefix(trimmed, "Summarizing ") {
-				inSummaries = true
-				continue
-			}
-			if inSummaries {
-				if trimmed == "" || strings.HasPrefix(trimmed, "Ran ") {
-					inSummaries = false
-					break
-				}
-				if strings.HasPrefix(trimmed, "[FAIL]") || strings.HasPrefix(trimmed, "[FLAKE]") {
-					resultLines = append(resultLines, trimmed)
-				}
-			}
+func parseTestResults(output string) ([]string, []string) {
+	var failed, flaky []string
+	lines := strings.Split(output, "\n")
+	
+	for _, line := range lines {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
 		}
-		if len(resultLines) > 0 {
-			return fmt.Sprintf("Failures/Flakes:\n%s\n", strings.Join(resultLines, "\n"))
+		
+		switch {
+		case failLineRegex.MatchString(line):
+			failed = append(failed, line)
+		case flakyRegex.MatchString(line):
+			flaky = append(flaky, line)
+		}
+	}
+	return failed, flaky
+}
+
+func generateSummary(failed, flaky []string) string {
+	var summary strings.Builder
+
+	if len(failed) > 0 {
+		summary.WriteString("Failing Tests:\n")
+		for _, line := range failed {
+			summary.WriteString(fmt.Sprintf("  - %s\n", line))
 		}
 	}
 
-	failureMatches := failureRegex.FindStringSubmatch(output)
-	if len(failureMatches) > 1 {
-		failingSuite := strings.TrimSpace(failureMatches[1])
-		return fmt.Sprintf("Failing test suite: %s\n", failingSuite)
+	if len(flaky) > 0 {
+		summary.WriteString("\nFlaky Tests:\n")
+		for _, line := range flaky {
+			summary.WriteString(fmt.Sprintf("  - %s\n", line))
+		}
 	}
 
-	return "No failing or flaky tests detected.\n"
+	if summary.Len() == 0 {
+		return "No failing or flaky tests detected."
+	}
+	return summary.String()
 }
-
-func parseRange(r string, max int) (int, int, error) {
-	if r == "" {
-		return 0, 0, nil
-	}
-	parts := strings.Split(r, "-")
-	if len(parts) != 2 {
-		return 0, 0, fmt.Errorf("range must be in the form start-end (e.g. 1-10)")
-	}
-	start, err := strconv.Atoi(parts[0])
-	if err != nil {
-		return 0, 0, fmt.Errorf("invalid start: %v", err)
-	}
-	end, err := strconv.Atoi(parts[1])
-	if err != nil {
-		return 0, 0, fmt.Errorf("invalid end: %v", err)
-	}
-	if start < 1 || end < 1 || start > max || end > max || start > end {
-		return 0, 0, fmt.Errorf("range %d-%d is out of valid bounds (1-%d)", start, end, max)
-	}
-	return start, end, nil
-}
-
