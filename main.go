@@ -18,14 +18,19 @@ import (
 	"golang.org/x/oauth2"
 )
 
+const (
+	batchSize    = 5
+	batchDelay   = 10 * time.Second
+	skipRepoName = "cluster-kube-apiserver-operator"
+)
+
 var (
-	failLineRegex  = regexp.MustCompile(`\[FAIL\]`)
-	flakyRegex     = regexp.MustCompile(`\[FLAKY\]`)
+	failLineRegex = regexp.MustCompile(`\[FAIL\]`)
+	flakyRegex    = regexp.MustCompile(`\[FLAKY\]`)
 )
 
 func main() {
 	selectedRepo := flag.String("repo", "", "Specify a repository name to run tests on (e.g., 'cloud-ingress-operator')")
-	batchSize := flag.Int("batch-size", 3, "Number of repositories to process in parallel")
 	flag.Parse()
 
 	ghToken := os.Getenv("GITHUB_TOKEN")
@@ -76,8 +81,8 @@ func main() {
 		log.Fatalf("Failed to create repos directory: %v", err)
 	}
 
-	for i := 0; i < len(repositories); i += *batchSize {
-		end := i + *batchSize
+	for i := 0; i < len(repositories); i += batchSize {
+		end := i + batchSize
 		if end > len(repositories) {
 			end = len(repositories)
 		}
@@ -92,14 +97,16 @@ func main() {
 func processBatch(batch []string, reposFolder string, writer, skippedWriter *bufio.Writer) {
 	for _, repoURL := range batch {
 		repoName := getRepoName(repoURL)
-		if repoName == "cluster-kube-apiserver-operator" {
-			fmt.Println("Skipping repo (cluster-kube-apiserver-operator): Unable to execute tests")
-			_, _ = writer.WriteString(fmt.Sprintf("\n%s\nUnable to execute tests.\n", repoName))
+		repoPath := filepath.Join(reposFolder, repoName)
+
+		// Skip specific repository
+		if repoName == skipRepoName {
+			fmt.Printf("Skipping repository: %s\n", repoName)
+			_, _ = writer.WriteString(fmt.Sprintf("\n%s\nRepository skipped by policy.\n", repoName))
 			writer.Flush()
 			continue
 		}
 
-		repoPath := filepath.Join(reposFolder, repoName)
 		fmt.Println("Cloning repository:", repoURL)
 		cmd := exec.Command("git", "clone", "--depth=1", repoURL, repoPath)
 		if err := cmd.Run(); err != nil {
@@ -119,16 +126,32 @@ func processBatch(batch []string, reposFolder string, writer, skippedWriter *buf
 
 		var failedTests []string
 		var flakyTests []string
+		var criticalError string
 
 		for i := 0; i < 3; i++ {
 			fmt.Printf("Running test for %s (Attempt %d/3) in directory %s\n", repoName, i+1, testDir)
-			output, _ := runGinkgoTests(testDir)
+			output, err := runGinkgoTests(testDir)
+
+			if err != nil {
+				if exitErr, ok := err.(*exec.ExitError); ok {
+					switch exitErr.ExitCode() {
+					case 2:
+						criticalError = fmt.Sprintf("[COMPILATION ERROR] %s", output)
+					case 3:
+						criticalError = fmt.Sprintf("[SETUP ERROR] %s", output)
+					}
+				}
+				if criticalError != "" {
+					break
+				}
+			}
+
 			failed, flaky := parseTestResults(output)
 			failedTests = append(failedTests, failed...)
 			flakyTests = append(flakyTests, flaky...)
 		}
 
-		testSummary := generateSummary(failedTests, flakyTests)
+		testSummary := generateSummary(failedTests, flakyTests, criticalError)
 		_, err = writer.WriteString(fmt.Sprintf("\n%s\n%s\n", repoName, testSummary))
 		if err != nil {
 			fmt.Println("Error writing to report file:", err)
@@ -137,9 +160,8 @@ func processBatch(batch []string, reposFolder string, writer, skippedWriter *buf
 	}
 
 	fmt.Println("Sleeping for 10 seconds before processing the next batch...")
-	time.Sleep(10 * time.Second)
+	time.Sleep(batchDelay)
 }
-
 
 func fetchOperatorRepos() ([]string, error) {
 	ghToken := os.Getenv("GITHUB_TOKEN")
@@ -209,13 +231,13 @@ func runGinkgoTests(testDir string) (string, error) {
 func parseTestResults(output string) ([]string, []string) {
 	var failed, flaky []string
 	lines := strings.Split(output, "\n")
-	
+
 	for _, line := range lines {
 		line = strings.TrimSpace(line)
 		if line == "" {
 			continue
 		}
-		
+
 		switch {
 		case failLineRegex.MatchString(line):
 			failed = append(failed, line)
@@ -226,8 +248,13 @@ func parseTestResults(output string) ([]string, []string) {
 	return failed, flaky
 }
 
-func generateSummary(failed, flaky []string) string {
+func generateSummary(failed, flaky []string, criticalError string) string {
 	var summary strings.Builder
+
+	if criticalError != "" {
+		summary.WriteString(fmt.Sprintf("Critical Error:\n  - %s\n", criticalError))
+		return summary.String()
+	}
 
 	if len(failed) > 0 {
 		summary.WriteString("Failing Tests:\n")
