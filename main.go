@@ -12,18 +12,20 @@ import (
 	"regexp"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/google/go-github/v53/github"
 	"golang.org/x/oauth2"
 )
 
 var (
-	failLineRegex  = regexp.MustCompile(`\[FAIL\]`)  // Matches any line containing [FAIL]
-	flakyRegex     = regexp.MustCompile(`\[FLAKY\]`) // Matches any line containing [FLAKY]
+	failLineRegex  = regexp.MustCompile(`\[FAIL\]`)
+	flakyRegex     = regexp.MustCompile(`\[FLAKY\]`)
 )
 
 func main() {
 	selectedRepo := flag.String("repo", "", "Specify a repository name to run tests on (e.g., 'cloud-ingress-operator')")
+	batchSize := flag.Int("batch-size", 3, "Number of repositories to process in parallel")
 	flag.Parse()
 
 	ghToken := os.Getenv("GITHUB_TOKEN")
@@ -50,9 +52,6 @@ func main() {
 
 	sort.Strings(repositories)
 	fmt.Println("Found", len(repositories), "operator repos:")
-	for i, repoURL := range repositories {
-		fmt.Printf("%3d) %s\n", i+1, repoURL)
-	}
 
 	reportFile, err := os.Create("test_report.txt")
 	if err != nil {
@@ -77,10 +76,30 @@ func main() {
 		log.Fatalf("Failed to create repos directory: %v", err)
 	}
 
-	for _, repoURL := range repositories {
-		repoName := getRepoName(repoURL)
-		repoPath := filepath.Join(reposFolder, repoName)
+	for i := 0; i < len(repositories); i += *batchSize {
+		end := i + *batchSize
+		if end > len(repositories) {
+			end = len(repositories)
+		}
+		batch := repositories[i:end]
+		processBatch(batch, reposFolder, writer, skippedWriter)
+	}
 
+	fmt.Println("\nTest execution completed. Results saved in test_report.txt")
+	fmt.Println("Skipped repos saved in skipped_repos.txt")
+}
+
+func processBatch(batch []string, reposFolder string, writer, skippedWriter *bufio.Writer) {
+	for _, repoURL := range batch {
+		repoName := getRepoName(repoURL)
+		if repoName == "cluster-kube-apiserver-operator" {
+			fmt.Println("Skipping repo (cluster-kube-apiserver-operator): Unable to execute tests")
+			_, _ = writer.WriteString(fmt.Sprintf("\n%s\nUnable to execute tests.\n", repoName))
+			writer.Flush()
+			continue
+		}
+
+		repoPath := filepath.Join(reposFolder, repoName)
 		fmt.Println("Cloning repository:", repoURL)
 		cmd := exec.Command("git", "clone", "--depth=1", repoURL, repoPath)
 		if err := cmd.Run(); err != nil {
@@ -117,9 +136,10 @@ func main() {
 		writer.Flush()
 	}
 
-	fmt.Println("\nTest execution completed. Results saved in test_report.txt")
-	fmt.Println("Skipped repos saved in skipped_repos.txt")
+	fmt.Println("Sleeping for 10 seconds before processing the next batch...")
+	time.Sleep(10 * time.Second)
 }
+
 
 func fetchOperatorRepos() ([]string, error) {
 	ghToken := os.Getenv("GITHUB_TOKEN")
